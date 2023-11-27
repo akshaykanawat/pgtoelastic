@@ -35,3 +35,27 @@ The system is designed to achieve real-time synchronization of changes made to a
 - Kafka broker accessible
 - Elasticsearch cluster available
 
+### Running the Docker Compose file to run kafka locally
+
+1. Make sure Docker is installed on your system.
+2. Navigate to the root of the repository in the terminal.
+3. Run the following command to start the Docker Compose services:
+
+    ```bash
+    docker-compose up -d
+    ```
+
+   This will start the PostgreSQL, Kafka, and other necessary services.
+
+4. To stop the services, run:
+
+    ```bash
+    docker-compose down
+    ```
+
+### Creating a Kafka Topic
+
+To create a Kafka topic, you can use the following command:
+
+```bash
+docker exec -it <your_kafka_container_id> kafka-topics --create --topic your_topic_name --bootstrap-server localhost:9092 --partitions 1 --replication-factor 1
