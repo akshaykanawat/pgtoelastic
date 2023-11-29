@@ -246,7 +246,6 @@ func queryUserProjectData(db *sql.DB, id int, project *Project) error {
 		users = append(users, user)
 	}
 	project.Users = users
-
 	return nil
 }
 
