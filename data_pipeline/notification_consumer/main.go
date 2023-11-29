@@ -13,6 +13,7 @@ import (
 	"fmt"
 	"github.com/confluentinc/confluent-kafka-go/kafka"
 	"github.com/elastic/go-elasticsearch/v8"
+	_ "github.com/lib/pq"
 	"github.com/mitchellh/mapstructure"
 	"log"
 	"os"
@@ -37,19 +38,36 @@ type ProjectHashtag struct {
 	ProjectID int `json:"project_id"`
 }
 
+type User struct {
+	ID        int       `json:"id"`
+	Name      string    `json:"username"`
+	CreatedAt time.Time `json:"created_at"`
+}
+
+// Hashtag represents a hashtag entity.
+type Hashtag struct {
+	ID        int       `json:"id"`
+	Name      string    `json:"name"`
+	CreatedAt time.Time `json:"created_at"`
+}
+
+// Project represents a project entity.
+type ProjectDB struct {
+	ID          int       `json:"id"`
+	Name        string    `json:"name"`
+	Slug        string    `json:"slug"`
+	Description string    `json:"description"`
+	CreatedAt   time.Time `json:"created_at"`
+}
+
 type Project struct {
 	ID          int       `json:"id"`
 	Name        string    `json:"name"`
 	Slug        string    `json:"slug"`
 	Description string    `json:"description"`
 	CreatedAt   time.Time `json:"created_at"`
-	Hashtags    []struct {
-		Name string `json:"name"`
-	} `json:"hashtags"`
-	Users []struct {
-		Name      string    `json:"name"`
-		CreatedAt time.Time `json:"created_at"`
-	} `json:"users"`
+	Hashtags    []Hashtag `json:"hashtags"`
+	Users       []User    `json:"users"`
 }
 
 func main() {
@@ -142,64 +160,104 @@ func processNotification(notification Notification, db *sql.DB, client *elastics
 
 func processUserProjectNotification(notification Notification, db *sql.DB, client *elasticsearch.TypedClient) {
 	var userProject UserProject
-	err := mapstructure.Decode(notification.Data, &userProject)
-	if err != nil {
-		log.Printf("Error decoding JSON for UserProject: %v", err)
-		return
-	}
-
-	var user Project
-	err = queryProjectData(db, "users", userProject.UserID, &user)
+	userProject.UserID = int(notification.Data["user_id"].(float64))
+	userProject.ProjectID = int(notification.Data["project_id"].(float64))
+	var project Project
+	err := queryUserProjectData(db, userProject.UserID, &project)
 	if err != nil {
 		log.Printf("Error querying users table: %v", err)
 		return
 	}
-
-	var project Project
-	err = queryProjectData(db, "projects", userProject.ProjectID, &project)
-	if err != nil {
-		log.Printf("Error querying projects table: %v", err)
-		return
-	}
-
 	updateElasticsearchIndex(notification.Operation, client, "projects", fmt.Sprintf("%v", project.ID), project)
 }
 
 func processProjectHashtagNotification(notification Notification, db *sql.DB, client *elasticsearch.TypedClient) {
 	var projectHashtag ProjectHashtag
+	projectHashtag.HashtagID = int(notification.Data["hashtag_id"].(float64))
+	projectHashtag.ProjectID = int(notification.Data["project_id"].(float64))
 	err := mapstructure.Decode(notification.Data, &projectHashtag)
-	if err != nil {
-		log.Printf("Error decoding JSON for ProjectHashtag: %v", err)
-		return
-	}
 	var project Project
-	err = queryProjectData(db, "projects", projectHashtag.ProjectID, &project)
+	err = queryProjectHashtagData(db, projectHashtag.ProjectID, &project)
 	if err != nil {
 		log.Printf("Error querying projects table: %v", err)
 		return
 	}
-
-	var hashtag Project
-	err = queryProjectData(db, "hashtags", projectHashtag.HashtagID, &hashtag)
-	if err != nil {
-		log.Printf("Error querying hashtags table: %v", err)
-		return
-	}
-
-	updateElasticsearchIndex(notification.Operation, client, "your-elasticsearch-index", fmt.Sprintf("%v", project.ID), project)
+	updateElasticsearchIndex(notification.Operation, client, "projects", fmt.Sprintf("%v", project.ID), project)
 }
 
-func queryProjectData(db *sql.DB, tableName string, id int, project *Project) error {
-	return db.QueryRow(fmt.Sprintf("SELECT * FROM %s WHERE id = $1", tableName), id).
-		Scan(&project.ID, &project.Name, &project.Slug, &project.Description, &project.CreatedAt)
+func queryProjectHashtagData(db *sql.DB, id int, project *Project) error {
+	var projectScanArgs = []interface{}{&project.ID, &project.Name, &project.Slug, &project.Description, &project.CreatedAt}
+
+	// Query projects table
+	projectQuery := "SELECT * FROM projects WHERE id = $1"
+	err := db.QueryRow(projectQuery, id).Scan(projectScanArgs...)
+	if err != nil {
+		return err
+	}
+
+	// Query project_hashtags table
+	hashtagsQuery := "SELECT h.* FROM hashtags h INNER JOIN project_hashtags ph ON h.id = ph.hashtag_id WHERE ph.project_id = $1"
+	rows, err := db.Query(hashtagsQuery, id)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+
+	var hashtags []Hashtag
+	for rows.Next() {
+		hashtag := Hashtag{}
+		err := rows.Scan(&hashtag.ID, &hashtag.Name, &hashtag.CreatedAt)
+		if err != nil {
+			return err
+		}
+		hashtags = append(hashtags, hashtag)
+	}
+	fmt.Println("hash: ", hashtags)
+	project.Hashtags = hashtags
+
+	return nil
+}
+
+func queryUserProjectData(db *sql.DB, id int, project *Project) error {
+	var projectScanArgs = []interface{}{&project.ID, &project.Name, &project.Slug, &project.Description, &project.CreatedAt}
+
+	// Query projects table
+	projectQuery := "SELECT * FROM projects WHERE id = $1"
+	err := db.QueryRow(projectQuery, id).Scan(projectScanArgs...)
+	if err != nil {
+		return err
+	}
+
+	// Query user_projects table
+	usersQuery := "SELECT u.* FROM users u INNER JOIN user_projects up ON u.id = up.user_id WHERE up.project_id = $1"
+	rows, err := db.Query(usersQuery, id)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+
+	var users []User
+	for rows.Next() {
+		user := User{}
+		err := rows.Scan(&user.ID, &user.Name, &user.CreatedAt)
+		if err != nil {
+			return err
+		}
+		users = append(users, user)
+	}
+	project.Users = users
+
+	return nil
 }
 
 func updateElasticsearchIndex(operation string, client *elasticsearch.TypedClient, indexName, documentID string, project Project) {
 	switch operation {
 	case "INSERT":
-		_, err := client.Index("projects").Id(documentID).Request(project).Do(context.TODO())
+		_, err := client.Index(indexName).Id(documentID).Request(project).Do(context.TODO())
 		if err != nil {
 			log.Printf("Error indexing data into Elasticsearch: %v", err)
+		} else {
+			log.Printf("success inserted")
 		}
 	case "DELETE":
 		_, err := client.Delete("projects", documentID).Do(context.Background())
