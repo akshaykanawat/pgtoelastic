@@ -103,7 +103,7 @@ func handleNotification(notification *pq.Notification, producer *kafka.Producer)
 		fmt.Println("Error parsing JSON:", err)
 		return
 	}
-	jsonData, err := json.Marshal(dbNotification.Data)
+	jsonData, err := json.Marshal(dbNotification)
 	if err != nil {
 		log.Println("Error converting to JSON:", err)
 		return
