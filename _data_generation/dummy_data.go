@@ -9,6 +9,7 @@ package main
 import (
 	"database/sql"
 	"fmt"
+	"github.com/lib/pq"
 	_ "github.com/lib/pq"
 	"log"
 	"math/rand"
@@ -56,26 +57,38 @@ func insertSeedData(pgDB *sql.DB, numRows int) error {
 			return err
 		}
 
-		// Insert hashtag
-		hashtagID, err := insertHashtag(pgDB, getRandomName(hashtagNames))
-		if err != nil {
-			return err
+		// Insert random number of hashtags for the project
+		numHashtags := rand.Intn(3) + 1 // Adjust the range based on your preference
+		var hashtagIDs []int
+
+		for j := 0; j < numHashtags; j++ {
+			hashtagID, err := insertHashtag(pgDB, getRandomName(hashtagNames))
+			if err != nil {
+				return err
+			}
+			hashtagIDs = append(hashtagIDs, hashtagID)
 		}
 
-		// Insert project
-		projectID, err := insertProject(pgDB, getRandomName(projectNames), generateSlug(getRandomName(projectNames)), fmt.Sprintf("Description for %s", getRandomName(projectNames)))
-		if err != nil {
-			return err
+		// Insert random number of projects for the user
+		numProjects := rand.Intn(3) + 1 // Adjust the range based on your preference
+		var projectIDs []int
+
+		for k := 0; k < numProjects; k++ {
+			projectID, err := insertProject(pgDB, getRandomName(projectNames), generateSlug(getRandomName(projectNames)), fmt.Sprintf("Description for %s", getRandomName(projectNames)))
+			if err != nil {
+				return err
+			}
+			projectIDs = append(projectIDs, projectID)
+
+			// Link project with hashtags
+			err = linkProjectHashtags(pgDB, projectID, hashtagIDs)
+			if err != nil {
+				return err
+			}
 		}
 
-		// Link project with hashtag
-		err = linkProjectHashtag(pgDB, projectID, hashtagID)
-		if err != nil {
-			return err
-		}
-
-		// Link user with project
-		err = linkUserProject(pgDB, userID, projectID)
+		// Link user with projects
+		err = linkUserProjects(pgDB, userID, projectIDs)
 		if err != nil {
 			return err
 		}
@@ -114,13 +127,13 @@ func insertProject(pgDB *sql.DB, name, slug, description string) (int, error) {
 	return projectID, nil
 }
 
-func linkProjectHashtag(pgDB *sql.DB, projectID, hashtagID int) error {
-	_, err := pgDB.Exec("INSERT INTO project_hashtags (hashtag_id, project_id) VALUES ($1, $2)", hashtagID, projectID)
+func linkProjectHashtags(pgDB *sql.DB, projectID int, hashtagIDs []int) error {
+	_, err := pgDB.Exec("INSERT INTO project_hashtags (hashtag_id, project_id) SELECT unnest($1::int[]), $2", pq.Array(hashtagIDs), projectID)
 	return err
 }
 
-func linkUserProject(pgDB *sql.DB, userID, projectID int) error {
-	_, err := pgDB.Exec("INSERT INTO user_projects (project_id, user_id) VALUES ($1, $2)", projectID, userID)
+func linkUserProjects(pgDB *sql.DB, userID int, projectIDs []int) error {
+	_, err := pgDB.Exec("INSERT INTO user_projects (project_id, user_id) SELECT unnest($1::int[]), $2", pq.Array(projectIDs), userID)
 	return err
 }
 
