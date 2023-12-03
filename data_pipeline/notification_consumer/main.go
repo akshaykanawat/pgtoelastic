@@ -1,6 +1,6 @@
 /*
 Version 1.00
-Date Created: 2023-11-29
+Date Created: 2023-12-29
 Copyright (c) 2023, Akshay Singh Kanawat
 Author: Akshay Singh Kanawat
 */
@@ -11,6 +11,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"github.com/confluentinc/confluent-kafka-go/kafka"
 	"github.com/elastic/go-elasticsearch/v8"
@@ -47,9 +48,10 @@ type User struct {
 
 // Hashtag represents a hashtag entity.
 type Hashtag struct {
-	ID        int    `json:"id"`
-	Name      string `json:"name"`
-	CreatedAt string `json:"created_at"`
+	ID         int    `json:"id"`
+	Name       string `json:"name"`
+	CreatedAt  string `json:"created_at"`
+	ProjectIds []int  `json:"project_ids"`
 }
 
 type Project struct {
@@ -59,19 +61,20 @@ type Project struct {
 	Description string `json:"description"`
 	CreatedAt   string `json:"created_at"`
 	HashtagIds  []int  `json:"hashtag_ids"`
+	UserIds     []int  `json:"user_ids"`
 }
 
 func main() {
 	// Set up Kafka consumer configuration
 	consumerConfig := kafka.ConfigMap{
-		"bootstrap.servers": "localhost:9092",
-		"group.id":          "pgsync-consumer", //TODO: fetch it from config
+		"bootstrap.servers": BootstrapServer,
+		"group.id":          ConsumerGroup, //TODO: fetch it from config
 		"auto.offset.reset": "earliest",
 	}
 
 	// Set up Elasticsearch client configuration
 	esConfig := elasticsearch.Config{
-		Addresses: []string{"http://localhost:9200"},
+		Addresses: []string{ElastisearchURL},
 	}
 
 	// Create Kafka consumer
@@ -81,7 +84,7 @@ func main() {
 	}
 	defer consumer.Close()
 
-	db, err := sql.Open("postgres", "postgres://postgres:postgres@localhost:5432/postgres?sslmode=disable")
+	db, err := sql.Open("postgres", PostgresURL)
 	if err != nil {
 		panic(err)
 	}
@@ -89,7 +92,7 @@ func main() {
 
 	// Subscribe to Kafka topic
 	log.Println("topic subscribed")
-	err = consumer.SubscribeTopics([]string{"pgsync"}, nil)
+	err = consumer.SubscribeTopics([]string{KafkaTopic}, nil)
 	if err != nil {
 		log.Fatalf("Error subscribing to Kafka topic: %v", err)
 	}
@@ -140,15 +143,15 @@ func main() {
 
 func processNotification(notification Notification, db *sql.DB, client *elasticsearch.TypedClient) {
 	switch notification.Table {
-	case "user_projects":
+	case TableUserProjects:
 		processUserProjectNotification(notification, client)
-	case "project_hashtags":
+	case TableProjectHashtags:
 		processProjectHashtagNotification(notification, client)
-	case "users":
+	case TableUsers:
 		processUserNotification(notification, client)
-	case "hashtags":
+	case TableHashtags:
 		processHashtagNotification(notification, client)
-	case "projects":
+	case TableProjects:
 		processProjectNotification(notification, client)
 	default:
 		log.Printf("Unhandled table: %s", notification.Table)
@@ -161,7 +164,7 @@ func processUserNotification(notification Notification, client *elasticsearch.Ty
 	user.Name = notification.Data["name"].(string)
 	user.CreatedAt = notification.Data["created_at"].(string)
 	// Update Elasticsearch index
-	updateElasticsearchIndex(notification.Operation, client, "users", fmt.Sprintf("%v", user.ID), user)
+	updateElasticsearchIndex(notification.Operation, client, IndexUsers, fmt.Sprintf("%v", user.ID), user)
 }
 
 func processHashtagNotification(notification Notification, client *elasticsearch.TypedClient) {
@@ -171,7 +174,7 @@ func processHashtagNotification(notification Notification, client *elasticsearch
 	hashtag.CreatedAt = notification.Data["created_at"].(string)
 
 	// Update Elasticsearch index
-	updateElasticsearchIndex(notification.Operation, client, "hashtags", fmt.Sprintf("%v", hashtag.ID), hashtag)
+	updateElasticsearchIndex(notification.Operation, client, IndexHashtags, fmt.Sprintf("%v", hashtag.ID), hashtag)
 }
 
 func processProjectNotification(notification Notification, client *elasticsearch.TypedClient) {
@@ -183,7 +186,7 @@ func processProjectNotification(notification Notification, client *elasticsearch
 	project.CreatedAt = notification.Data["created_at"].(string)
 
 	// Update Elasticsearch index
-	updateElasticsearchIndex(notification.Operation, client, "projects", fmt.Sprintf("%v", project.ID), project)
+	updateElasticsearchIndex(notification.Operation, client, IndexProjects, fmt.Sprintf("%v", project.ID), project)
 }
 
 func processUserProjectNotification(notification Notification, client *elasticsearch.TypedClient) {
@@ -196,54 +199,79 @@ func processUserProjectNotification(notification Notification, client *elasticse
 	updateUserProjectIndex(userProject, operation, client)
 }
 func updateUserProjectIndex(userProject UserProject, operation string, esClient *elasticsearch.TypedClient) {
-	// Assuming the Elasticsearch User Index is named "users"
-	indexName := "users"
-
+	indexNameUsers := IndexUsers
+	indexNameProjects := IndexProjects
 	// Define the update query based on the operation
-	var sourceScript string
+	var sourceScriptUsers string
+	var sourceScriptProjects string
 	switch operation {
 	case "INSERT":
-		sourceScript = "if (ctx._source.project_ids == null) { ctx._source.project_ids = [] } ctx._source.project_ids.add(params.project_id)"
+		sourceScriptUsers = "if (ctx._source.project_ids == null) { ctx._source.project_ids = [] } ctx._source.project_ids.add(params.project_id)"
+		sourceScriptProjects = "if (ctx._source.user_ids == null) { ctx._source.user_ids = [] } ctx._source.user_ids.add(params.user_id)"
+
 	case "DELETE":
-		sourceScript = "if (ctx._source.containsKey('project_ids')) { ctx._source.project_ids.remove(ctx._source.project_ids.indexOf(params.project_id)) }"
+		sourceScriptUsers = "if (ctx._source.containsKey('project_ids')) { ctx._source.project_ids.remove(ctx._source.project_ids.indexOf(params.project_id)) }"
+		sourceScriptProjects = "if (ctx._source.containsKey('user_ids')) { ctx._source.user_ids.remove(ctx._source.user_ids.indexOf(params.user_id)) }"
+
 	default:
 		log.Printf("Unsupported operation: %s", operation)
 		return
 	}
 
 	// Define the update query
-	query := map[string]interface{}{
+	queryProjects := map[string]interface{}{
 		"script": map[string]interface{}{
-			"source": sourceScript,
+			"source": sourceScriptProjects,
+			"lang":   "painless",
+			"params": map[string]int{
+				"user_id": userProject.UserID,
+			},
+		},
+	}
+
+	// Define the update query
+	queryUsers := map[string]interface{}{
+		"script": map[string]interface{}{
+			"source": sourceScriptUsers,
 			"lang":   "painless",
 			"params": map[string]int{
 				"project_id": userProject.ProjectID,
 			},
 		},
 	}
+	// Update the document in Elasticsearch
+	err := updateDocumentInElasticsearch(indexNameUsers, fmt.Sprintf("%d", userProject.UserID), queryUsers, esClient)
+	if err != nil {
+		// Handle the error as needed
+		log.Printf("Error updating document in Elasticsearch: %v", err)
+	}
+	err = updateDocumentInElasticsearch(indexNameProjects, fmt.Sprintf("%d", userProject.ProjectID), queryProjects, esClient)
+	if err != nil {
+		// Handle the error as needed
+		log.Printf("Error updating document in Elasticsearch: %v", err)
+	}
+}
 
+func updateDocumentInElasticsearch(indexName string, documentID string, query map[string]interface{}, esClient *elasticsearch.TypedClient) error {
 	// Serialize the query to JSON
 	queryJSON, err := json.Marshal(query)
 	if err != nil {
 		log.Println("Error marshalling query:", err)
-		return
+		return err
 	}
-
-	// Create an io.Reader from the JSON bytes
-	bodyReader := bytes.NewBuffer(queryJSON)
 
 	// Define the UpdateRequest
 	request := esapi.UpdateRequest{
 		Index:      indexName,
-		DocumentID: fmt.Sprintf("%d", userProject.UserID),
-		Body:       bodyReader,
+		DocumentID: documentID,
+		Body:       bytes.NewReader(queryJSON),
 	}
 
 	// Perform the update request
 	response, err := request.Do(context.Background(), esClient)
 	if err != nil {
 		log.Printf("Error updating document. Error: %v", err)
-		return
+		return err
 	}
 
 	defer response.Body.Close()
@@ -253,11 +281,14 @@ func updateUserProjectIndex(userProject UserProject, operation string, esClient 
 		var b map[string]interface{}
 		if err := json.NewDecoder(response.Body).Decode(&b); err != nil {
 			log.Printf("Error parsing the response body: %v", err)
-			return
+			return err
 		}
 
 		log.Printf("Elasticsearch error: %s", b["error"].(map[string]interface{})["reason"].(string))
+		return errors.New("Elasticsearch update error")
 	}
+
+	return nil
 }
 
 func processProjectHashtagNotification(notification Notification, client *elasticsearch.TypedClient) {
@@ -271,23 +302,26 @@ func processProjectHashtagNotification(notification Notification, client *elasti
 }
 
 func updateProjectHashtagIndex(projectHashtag ProjectHashtag, operation string, esClient *elasticsearch.TypedClient) {
-	// Assuming the Elasticsearch Project Index is named "projects"
-	indexName := "projects"
-
+	indexNameProjects := IndexProjects
+	indexNameHashtags := IndexHashtags
 	// Define the update query based on the operation
-	var sourceScript string
+	var sourceScript, sourceScriptHashtags string
 	switch operation {
 	case "INSERT":
 		sourceScript = "if (ctx._source.hashtag_ids == null){ ctx._source.hashtag_ids = []} ctx._source.hashtag_ids.add(params.hashtag_id)"
+		sourceScriptHashtags = "if (ctx._source.project_ids == null){ ctx._source.project_ids = []} ctx._source.project_ids.add(params.project_id)"
+
 	case "DELETE":
 		sourceScript = "if (ctx._source.containsKey('hashtag_ids')) { ctx._source.hashtag_ids.remove(ctx._source.hashtag_ids.indexOf(params.hashtag_id)) }"
+		sourceScriptHashtags = "if (ctx._source.containsKey('project_ids')) { ctx._source.project_ids.remove(ctx._source.project_ids.indexOf(params.project_id)) }"
+
 	default:
 		log.Printf("Unsupported operation: %s", operation)
 		return
 	}
 
 	// Define the update query
-	query := map[string]interface{}{
+	queryProjects := map[string]interface{}{
 		"script": map[string]interface{}{
 			"source": sourceScript,
 			"lang":   "painless",
@@ -296,55 +330,39 @@ func updateProjectHashtagIndex(projectHashtag ProjectHashtag, operation string, 
 			},
 		},
 	}
+	queryHashtags := map[string]interface{}{
+		"script": map[string]interface{}{
+			"source": sourceScriptHashtags,
+			"lang":   "painless",
+			"params": map[string]int{
+				"project_id": projectHashtag.ProjectID,
+			},
+		},
+	}
 
-	queryJSON, err := json.Marshal(query)
+	err := updateDocumentInElasticsearch(indexNameProjects, fmt.Sprintf("%d", projectHashtag.ProjectID), queryProjects, esClient)
 	if err != nil {
-		log.Println("Error marshalling query:", err)
-		return
+		// Handle the error as needed
+		log.Printf("Error updating document in Elasticsearch: %v", err)
 	}
-
-	// Create an io.Reader from the JSON bytes
-	bodyReader := bytes.NewBuffer(queryJSON)
-
-	// Define the UpdateRequest
-	request := esapi.UpdateRequest{
-		Index:      indexName,
-		DocumentID: fmt.Sprintf("%d", projectHashtag.ProjectID),
-		Body:       bodyReader,
-	}
-
-	// Perform the update request
-	response, err := request.Do(context.Background(), esClient)
+	err = updateDocumentInElasticsearch(indexNameHashtags, fmt.Sprintf("%d", projectHashtag.HashtagID), queryHashtags, esClient)
 	if err != nil {
-		log.Printf("Error updating document. Error: %v", err)
-		return
-	}
-
-	defer response.Body.Close()
-
-	log.Printf("Document updated successfully. Result: %v", response)
-	if response.IsError() {
-		var b map[string]interface{}
-		if err := json.NewDecoder(response.Body).Decode(&b); err != nil {
-			log.Printf("Error parsing the response body: %v", err)
-			return
-		}
-
-		log.Printf("Elasticsearch error: %s", b["error"].(map[string]interface{})["reason"].(string))
+		// Handle the error as needed
+		log.Printf("Error updating document in Elasticsearch: %v", err)
 	}
 }
 
 func updateElasticsearchIndex(operation string, client *elasticsearch.TypedClient, indexName, documentID string, data interface{}) {
 	switch operation {
-	case "INSERT", "UPDATE":
+	case OperationInsert, OperationUpdate:
 		_, err := client.Index(indexName).Id(documentID).Document(data).Do(context.TODO())
 		if err != nil {
 			log.Printf("Error indexing data into Elasticsearch: %v", err)
 		} else {
 			log.Printf("Success: Document %s indexed/updated", documentID)
 		}
-	case "DELETE":
-		_, err := client.Delete("projects", documentID).Do(context.Background())
+	case OperationDelete:
+		_, err := client.Delete(IndexProjects, documentID).Do(context.Background())
 		if err != nil {
 			log.Printf("Error deleting data from Elasticsearch: %v", err)
 		} else {

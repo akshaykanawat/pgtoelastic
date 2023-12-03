@@ -5,9 +5,10 @@ import (
 	"log"
 	"pgsync/server/app/handlers"
 	"pgsync/server/app/middleware"
+	"pgsync/server/database"
 )
 
-const GetProjectsByUsers = "/user/:userID"
+const GetProjectsByUsers = "/user/:id"
 const GetProjectByHashtag = "/hashtags/:hashtags"
 const SearchProject = "/search"
 const SendError = "/error"
@@ -17,6 +18,10 @@ func SetupServer() *gin.Engine {
 	log.Printf("setting_up_routes...")
 	r := gin.Default()
 	pgCore := r.Group("/v1/projects")
+	_, err := database.ConnectEsClient()
+	if err != nil {
+		panic("[Error] failed to start Gin server due to: " + err.Error())
+	}
 	addV1Routes(pgCore)
 	addProjectRoutes(pgCore) // Add new project routes
 	return r

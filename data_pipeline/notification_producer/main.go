@@ -24,14 +24,14 @@ type Notification struct {
 }
 
 func main() {
-	connStr := "postgresql://postgres:postgres@localhost:5432/postgres?sslmode=disable" //TODO: Fetch from env or aws secrets
+	connStr := PostgresURL //TODO: Fetch from env or aws secrets
 	db := openDatabaseConnection(connStr)
 	defer db.Close()
 
-	channels := []string{"crud_operations"} // Replace with your channel name
+	channels := []string{NotificationChannel} // Replace with your channel name
 	setupDatabaseListeners(db, channels)
 
-	brokers := "localhost:9092" // Replace with your Kafka broker addresses
+	brokers := BootstrapServer // Replace with your Kafka broker addresses
 	producer := setupConfluentKafkaProducer(brokers)
 	defer closeConfluentKafkaProducer(producer)
 
@@ -88,7 +88,7 @@ func setupPqListener(connStr string) *pq.Listener {
 	}
 
 	listener := pq.NewListener(connStr, 10*time.Second, time.Minute, notificationHandler)
-	err := listener.Listen("crud_operations")
+	err := listener.Listen(NotificationChannel)
 	if err != nil {
 		panic(err)
 	}
@@ -108,7 +108,7 @@ func handleNotification(notification *pq.Notification, producer *kafka.Producer)
 		log.Println("Error converting to JSON:", err)
 		return
 	}
-	kafkaTopic := "pgsync" //TODO: fetch from config
+	kafkaTopic := KafkaTopic
 	message := &kafka.Message{
 		TopicPartition: kafka.TopicPartition{Topic: &kafkaTopic, Partition: kafka.PartitionAny},
 		Key:            []byte(dbNotification.Table),

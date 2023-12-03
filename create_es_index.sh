@@ -16,7 +16,8 @@ curl -X PUT "http://localhost:9200/hashtags" -H 'Content-Type: application/json'
   "mappings": {
     "properties": {
       "id": { "type": "integer" },
-      "name": { "type": "text" }
+      "name": { "type": "keyword" },
+      "project_ids" : { "type": "integer" }
     }
   }
 }
@@ -51,7 +52,8 @@ curl -X PUT "http://localhost:9200/projects" -H 'Content-Type: application/json'
         }
       },
       "created_at": { "type": "date" },
-      "hashtag_ids": { "type": "integer" }
+      "hashtag_ids": { "type": "integer" },
+      "user_ids": { "type": "integer" }
     }
   },
   "settings": {

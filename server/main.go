@@ -10,14 +10,12 @@ import (
 	"log"
 	"pgsync/server/app/routes"
 	"pgsync/server/config"
-	"pgsync/server/database"
 )
 
 func main() {
 
 	r := routes.SetupServer()
 	log.Print("Server online. Enjoy the ride....")
-	database.ConnectEsClient()
 	err := r.Run(config.PORT)
 	if err != nil {
 		panic("[Error] failed to start Gin server due to: " + err.Error())
